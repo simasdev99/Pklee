@@ -1,0 +1,288 @@
+  <!DOCTYPE html>
+  <html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Leitor PDF</title>
+  
+    <!-- Manifesto PWA -->
+    <link rel="manifest" href="manifest.json" />
+    <link rel="icon" href="icon-192.png" />
+  
+    <style>
+      :root {
+        --bg: #0b0b0b;
+        --card: #1a1a1a;
+        --text: #e6e6e6;
+        --accent: #4e8cff;
+      }
+  
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+        font-family: "Segoe UI", sans-serif;
+      }
+  
+      body {
+        background: var(--bg);
+        color: var(--text);
+        padding: 20px;
+      }
+  
+      header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+      }
+  
+      h1 {
+        font-size: 24px;
+        font-weight: 600;
+      }
+  
+      #addBtn {
+        background: var(--accent);
+        border: none;
+        color: white;
+        padding: 10px 16px;
+        border-radius: 8px;
+        font-size: 14px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+  
+      #books {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+        gap: 16px;
+      }
+  
+      .book-card {
+        background: var(--card);
+        border-radius: 10px;
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        cursor: pointer;
+        box-shadow: 0 4px 10px rgba(0, 0, 0, 0.4);
+        transition: 0.2s;
+      }
+  
+      .book-card:hover {
+        transform: scale(1.03);
+      }
+  
+      .thumb {
+        width: 100%;
+        height: 180px;
+        object-fit: cover;
+        border-radius: 8px;
+        margin-bottom: 10px;
+        background: #111;
+      }
+  
+      .book-title {
+        font-size: 14px;
+        font-weight: 500;
+        margin-top: auto;
+        text-align: center;
+      }
+  
+      /* LEITOR */
+      #reader {
+        position: fixed;
+        inset: 0;
+        background: var(--bg);
+        display: none;
+        flex-direction: column;
+      }
+  
+      #pdfContainer {
+        flex: 1;
+        overflow: hidden;
+        position: relative;
+      }
+  
+      canvas {
+        width: 100% !important;
+        height: auto !important;
+        display: block;
+        margin: auto;
+        user-select: none;
+      }
+  
+      #progress {
+        height: 6px;
+        background: #222;
+        margin: 6px;
+        border-radius: 10px;
+        overflow: hidden;
+      }
+  
+      #progressBar {
+        height: 100%;
+        width: 0%;
+        background: var(--accent);
+      }
+  
+      #closeReader {
+        padding: 12px;
+        background: var(--accent);
+        border: none;
+        color: white;
+        font-weight: bold;
+        font-size: 16px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Meus Livros</h1>
+      <button id="addBtn">Adicionar PDF</button>
+      <input id="fileInput" type="file" accept="application/pdf" hidden />
+    </header>
+  
+    <div id="books"></div>
+  
+    <!-- LEITOR FULLSCREEN -->
+    <div id="reader">
+      <button id="closeReader">Fechar</button>
+      <div id="progress"><div id="progressBar"></div></div>
+      <div id="pdfContainer"><canvas id="pdfCanvas"></canvas></div>
+    </div>
+  
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script>
+      const fileInput = document.getElementById("fileInput");
+      const booksDiv = document.getElementById("books");
+      const reader = document.getElementById("reader");
+      const pdfCanvas = document.getElementById("pdfCanvas");
+      const closeReader = document.getElementById("closeReader");
+      const progressBar = document.getElementById("progressBar");
+  
+      let pdfDoc = null;
+      let pageNum = 1;
+      let ctx = pdfCanvas.getContext("2d");
+  
+      // Salvar livros no IndexedDB
+      let DB;
+      const request = indexedDB.open("PDFLibrary", 1);
+  
+      request.onupgradeneeded = e => {
+        DB = e.target.result;
+        DB.createObjectStore("books", { keyPath: "id", autoIncrement: true });
+      };
+  
+      request.onsuccess = e => {
+        DB = e.target.result;
+        loadBooks();
+      };
+  
+      // Botão adicionar
+      document.getElementById("addBtn").onclick = () => fileInput.click();
+  
+      fileInput.onchange = async e => {
+        const file = e.target.files[0];
+        if (!file) return;
+  
+        const arrayBuffer = await file.arrayBuffer();
+        const cover = await generateCover(arrayBuffer);
+  
+        const tx = DB.transaction("books", "readwrite");
+        tx.objectStore("books").add({ title: file.name, pdf: arrayBuffer, cover });
+        tx.oncomplete = loadBooks;
+      };
+  
+      function loadBooks() {
+        booksDiv.innerHTML = "";
+        const tx = DB.transaction("books", "readonly");
+        const store = tx.objectStore("books");
+  
+        store.openCursor().onsuccess = e => {
+          const cursor = e.target.result;
+          if (!cursor) return;
+  
+          const book = cursor.value;
+          const div = document.createElement("div");
+          div.className = "book-card";
+  
+          div.innerHTML = `
+            <img class='thumb' src='${book.cover}' />
+            <div class='book-title'>${book.title}</div>
+          `;
+  
+          div.onclick = () => openBook(book);
+          booksDiv.appendChild(div);
+  
+          cursor.continue();
+        };
+      }
+  
+      // Gerar capa
+      async function generateCover(buffer) {
+        const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+        const page = await pdf.getPage(1);
+        const viewport = page.getViewport({ scale: 0.5 });
+  
+        const canvas = document.createElement("canvas");
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+  
+        return canvas.toDataURL();
+      }
+  
+      // Abrir livro
+      async function openBook(book) {
+        reader.style.display = "flex";
+  
+        pdfDoc = await pdfjsLib.getDocument({ data: book.pdf }).promise;
+  
+        pageNum = 1;
+        renderPage(pageNum);
+  
+        pdfContainer.addEventListener("touchstart", startTouch);
+        pdfContainer.addEventListener("touchend", endTouch);
+      }
+  
+      async function renderPage(num) {
+        const page = await pdfDoc.getPage(num);
+        const viewport = page.getViewport({ scale: 1.6 });
+  
+        pdfCanvas.width = viewport.width;
+        pdfCanvas.height = viewport.height;
+  
+        await page.render({ canvasContext: ctx, viewport }).promise;
+  
+        progressBar.style.width = (num / pdfDoc.numPages * 100) + "%";
+      }
+  
+      let startX = 0;
+      function startTouch(e) {
+        startX = e.touches[0].clientX;
+      }
+  
+      function endTouch(e) {
+        const endX = e.changedTouches[0].clientX;
+        const diff = endX - startX;
+  
+        if (diff < -50 && pageNum < pdfDoc.numPages) {
+          pageNum++;
+          renderPage(pageNum);
+        }
+  
+        if (diff > 50 && pageNum > 1) {
+          pageNum--;
+          renderPage(pageNum);
+        }
+      }
+  
+      closeReader.onclick = () => {
+        reader.style.display = "none";
+      };
+    </script>
+  </body>
+  </html>
+
